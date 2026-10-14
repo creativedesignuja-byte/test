@@ -1,6 +1,6 @@
 # Rasta live acceptance test
 
-State: **ready**
+State: **ended**
 
 https://distances-distribute-limits-say.trycloudflare.com
 
