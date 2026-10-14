@@ -1,0 +1,62 @@
+name: rasta-production
+
+services:
+  app:
+    build:
+      context: .
+    image: rasta:production
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${APP_PORT:-8080}:80"
+    environment:
+      APP_NAME: Rasta
+      APP_ENV: production
+      APP_DEBUG: "false"
+      APP_KEY: ${APP_KEY:?Set APP_KEY in deploy/.env.production}
+      APP_URL: ${APP_URL:?Set the public HTTPS APP_URL in deploy/.env.production}
+      APP_LOCALE: fa
+      APP_FALLBACK_LOCALE: fa
+      TRUSTED_PROXIES: ${TRUSTED_PROXIES:-}
+      DB_CONNECTION: mysql
+      DB_HOST: database
+      DB_PORT: "3306"
+      DB_DATABASE: rasta
+      DB_USERNAME: rasta
+      DB_PASSWORD: ${DB_PASSWORD:?Set DB_PASSWORD in deploy/.env.production}
+      SESSION_DRIVER: file
+      SESSION_SECURE_COOKIE: "true"
+      SESSION_HTTP_ONLY: "true"
+      SESSION_SAME_SITE: lax
+      CACHE_STORE: file
+      QUEUE_CONNECTION: sync
+      FILESYSTEM_DISK: local
+      LOG_CHANNEL: stderr
+      LOG_LEVEL: warning
+      MAIL_MAILER: log
+      RUN_MIGRATIONS: "true"
+    volumes:
+      - uploads-and-sessions:/var/www/html/storage
+    depends_on:
+      database:
+        condition: service_healthy
+
+  database:
+    image: mysql:8.4
+    restart: unless-stopped
+    environment:
+      MYSQL_DATABASE: rasta
+      MYSQL_USER: rasta
+      MYSQL_PASSWORD: ${DB_PASSWORD:?Set DB_PASSWORD in deploy/.env.production}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?Set MYSQL_ROOT_PASSWORD in deploy/.env.production}
+    volumes:
+      - database:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "MYSQL_PWD=$$MYSQL_ROOT_PASSWORD mysql --protocol=TCP --host=127.0.0.1 --user=root --batch --skip-column-names --execute='SELECT 1' >/dev/null"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+
+volumes:
+  database:
+  uploads-and-sessions:

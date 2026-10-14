@@ -1,0 +1,5 @@
+@props(['model','label'=>'انتخاب تاریخ'])
+<div class="date-picker" x-data="datePicker" x-modelable="value" x-model="{{ $model }}" @click.outside="open=false" @keydown.escape.stop="open=false">
+<button type="button" class="date-trigger" @click="open=!open;render()" :aria-expanded="open" aria-label="{{ $label }}"><span x-text="label()"></span><span x-html="$icon('CalendarDays')"></span></button>
+<div class="calendar-pop" x-show="open" x-cloak><div class="calendar-head"><button type="button" class="icon-btn" @click="move(-1)" aria-label="ماه قبل" x-html="$icon('ChevronRight')"></button><strong x-text="heading"></strong><button type="button" class="icon-btn" @click="move(1)" aria-label="ماه بعد" x-html="$icon('ChevronLeft')"></button></div><div class="calendar-grid"><template x-for="(d,i) in ['ش','ی','د','س','چ','پ','ج']" :key="i"><span class="muted" x-text="d"></span></template><template x-for="day in days" :key="day.iso"><button type="button" @click="value=day.iso;open=false" :class="{'muted':day.muted,'selected':day.iso===value}" x-text="day.label"></button></template></div></div>
+</div>

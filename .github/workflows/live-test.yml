@@ -1,0 +1,111 @@
+name: Live Laravel acceptance test
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: [.github/workflows/live-test.yml]
+permissions:
+  contents: write
+concurrency:
+  group: live-laravel-acceptance-test
+  cancel-in-progress: false
+jobs:
+  live-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v4
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: mbstring, intl, pdo_mysql, pdo_sqlite, dom, xml, curl, fileinfo
+          coverage: none
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - name: Install locked dependencies and build
+        run: |
+          composer install --no-interaction --prefer-dist --no-progress
+          npm ci
+          npm run build
+      - name: Generate private session configuration
+        run: |
+          python3 - <<'PY'
+          import os, secrets
+          from pathlib import Path
+          root_password=secrets.token_urlsafe(32)
+          db_password=secrets.token_urlsafe(32)
+          p=Path(os.environ['RUNNER_TEMP'])/'rasta-mysql.env'
+          p.write_text(f'MYSQL_ROOT_PASSWORD={root_password}\nMYSQL_DATABASE=rasta\nMYSQL_USER=rasta\nMYSQL_PASSWORD={db_password}\n')
+          p.chmod(0o600)
+          s=Path('.env.example').read_text().replace('APP_ENV=local','APP_ENV=production').replace('APP_DEBUG=true','APP_DEBUG=false').replace('DB_PASSWORD=','DB_PASSWORD='+db_password)
+          s+='\nSESSION_SECURE_COOKIE=true\nTRUSTED_PROXIES=127.0.0.1,::1\nLIVE_TEST_MODE=true\n'
+          p=Path('.env');p.write_text(s);p.chmod(0o600)
+          PY
+          php artisan key:generate --force
+      - name: Automated feature tests
+        run: php artisan test --compact
+      - name: Start private MySQL and Laravel
+        run: |
+          docker run -d --name rasta-live-mysql --env-file "$RUNNER_TEMP/rasta-mysql.env" -p 127.0.0.1:3306:3306 mysql:8.4
+          ready=0
+          for attempt in $(seq 1 90); do
+            if docker exec rasta-live-mysql sh -c 'MYSQL_PWD="$MYSQL_PASSWORD" mysql -u "$MYSQL_USER" "$MYSQL_DATABASE" -e "SELECT 1"' >/dev/null 2>&1; then ready=1; break; fi
+            sleep 2
+          done
+          test "$ready" = 1
+          php artisan migrate --force
+          php artisan view:cache
+          cd public
+          PHP_CLI_SERVER_WORKERS=4 nohup php -S 127.0.0.1:8000 ../vendor/laravel/framework/src/Illuminate/Foundation/resources/server.php > "$RUNNER_TEMP/rasta-php.log" 2>&1 &
+          for attempt in $(seq 1 20); do curl -fsS http://127.0.0.1:8000/up >/dev/null && break; sleep 1; done
+          curl -fsS http://127.0.0.1:8000/up >/dev/null
+      - name: Open temporary Cloudflare test tunnel
+        run: |
+          docker run -d --name rasta-live-tunnel --network host cloudflare/cloudflared:latest tunnel --no-autoupdate --protocol http2 --url http://127.0.0.1:8000
+          for attempt in $(seq 1 60); do
+            docker logs rasta-live-tunnel > "$RUNNER_TEMP/rasta-tunnel.log" 2>&1
+            if python3 - <<'PY'
+          import os,re,sys
+          from pathlib import Path
+          from datetime import datetime,timedelta,timezone
+          text=(Path(os.environ['RUNNER_TEMP'])/'rasta-tunnel.log').read_text()
+          urls=re.findall(r'https://[a-z0-9-]+\.trycloudflare\.com',text)
+          if not urls: sys.exit(1)
+          url=urls[0]; expiry=(datetime.now(timezone.utc)+timedelta(minutes=55)).isoformat()
+          with open(os.environ['GITHUB_ENV'],'a') as f:f.write(f'LIVE_TEST_URL={url}\nLIVE_TEST_EXPIRES_AT={expiry}\n')
+          p=Path('.env');s=p.read_text().replace('APP_URL=http://localhost','APP_URL='+url);p.write_text(s+'LIVE_TEST_EXPIRES_AT='+expiry+'\n')
+          PY
+            then break; fi
+            sleep 2
+          done
+      - name: Verify public application and database roundtrip
+        run: |
+          test -n "$LIVE_TEST_URL"
+          php artisan config:cache
+          for attempt in $(seq 1 60); do curl -fsS "$LIVE_TEST_URL/up" >/dev/null && break; sleep 2; done
+          curl -fsS "$LIVE_TEST_URL/up" >/dev/null
+          npx playwright install --with-deps chromium
+          node scripts/check-live-site.cjs
+      - name: Publish live test address
+        run: |
+          python3 scripts/publish-live-test-status.py ready
+          echo "::notice title=Live application test URL::$LIVE_TEST_URL (temporary; expires $LIVE_TEST_EXPIRES_AT)"
+          printf '### Live Laravel + MySQL acceptance test\n\n%s\n\nExpires: %s\n\nRegister a new account to try projects and tasks. Data is temporary and is removed when the test ends.\n' "$LIVE_TEST_URL" "$LIVE_TEST_EXPIRES_AT" >> "$GITHUB_STEP_SUMMARY"
+      - name: Interactive acceptance-test window
+        run: |
+          python3 - <<'PY'
+          import os,time,urllib.request
+          from datetime import datetime,timezone
+          expiry=datetime.fromisoformat(os.environ['LIVE_TEST_EXPIRES_AT'])
+          while datetime.now(timezone.utc)<expiry:
+              with urllib.request.urlopen('http://127.0.0.1:8000/up',timeout=10) as r:
+                  assert r.status==200
+              time.sleep(min(30,max(0,(expiry-datetime.now(timezone.utc)).total_seconds())))
+          PY
+      - name: Close test session
+        if: always()
+        run: |
+          if [ -n "${LIVE_TEST_URL:-}" ]; then python3 scripts/publish-live-test-status.py ended; fi
+          docker rm -f rasta-live-tunnel rasta-live-mysql >/dev/null 2>&1 || true
